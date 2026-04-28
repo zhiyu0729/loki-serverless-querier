@@ -118,10 +118,11 @@ AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 PROJECT_OWNER=zhiyu0729
 PROJECT_VERSION=v0.1.0
 LOKI_VERSION=v3.7.1
-LAMBDA_ARCH=arm64
+LAMBDA_GOARCH=amd64
+LAMBDA_ARCH=x86_64
 
 IMAGE_URI="ghcr.io/$PROJECT_OWNER/loki-serverless-querier:loki-$LOKI_VERSION-$PROJECT_VERSION"
-LAMBDA_ZIP="loki-serverless-querier-lambda-$LAMBDA_ARCH.zip"
+LAMBDA_ZIP="loki-serverless-querier-lambda-$LAMBDA_GOARCH.zip"
 
 LAMBDA_FUNCTION=loki-store-query
 LAMBDA_ROLE_NAME=loki-store-query-lambda
@@ -371,7 +372,9 @@ aws lambda create-function \
   --environment "$LAMBDA_ENV"
 ```
 
-Use `x86_64` instead of `arm64` if the zip was built with `TARGETARCH=amd64`.
+Use `LAMBDA_GOARCH=arm64` and `LAMBDA_ARCH=arm64` if you want the ARM Lambda
+runtime. The zip artifact name uses Go's architecture name, while
+`aws lambda create-function --architectures` uses AWS's architecture name.
 When the binary starts inside Lambda and `AWS_LAMBDA_RUNTIME_API` is present, it
 defaults to `lambda-executor` mode.
 
