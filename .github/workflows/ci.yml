@@ -149,6 +149,21 @@ jobs:
           GO_VERSION: ${{ env.GO_VERSION }}
         run: make build-overlay-local
 
+      - name: Build Lambda zip
+        env:
+          LOKI_VERSION: ${{ steps.meta.outputs.loki_version }}
+          TARGETARCH: ${{ steps.meta.outputs.target_arch }}
+          OVERLAY_VERSION: ${{ steps.meta.outputs.overlay_version }}
+          GO_VERSION: ${{ env.GO_VERSION }}
+        run: make build-lambda-zip
+
+      - name: Upload Lambda zip artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: loki-serverless-querier-lambda-${{ steps.meta.outputs.loki_version }}-${{ steps.meta.outputs.target_arch }}
+          path: build/loki-${{ steps.meta.outputs.loki_version }}/dist/loki-serverless-querier-lambda-${{ steps.meta.outputs.target_arch }}.zip
+          if-no-files-found: error
+
       - name: Tag image aliases
         run: |
           set -euo pipefail

@@ -95,68 +95,69 @@ Version-specific Loki patches live under `patches/<LOKI_VERSION>/`. Upgrading
 Loki should be done by adding or updating a version-specific patch directory and
 running the overlay build checks.
 
-## Build
-
-Build the default Loki `v3.7.1` image:
-
-```bash
-make build-overlay LOKI_VERSION=v3.7.1 IMAGE=loki-serverless-querier:v3.7.1
-```
-
-For local development, you can build the Linux binaries with the local Go
-toolchain and then package them into the final image:
-
-```bash
-SKIP_FETCH=1 make build-overlay-local LOKI_VERSION=v3.7.1 IMAGE=loki-serverless-querier:v3.7.1
-```
-
-The local build strategy requires an existing Loki checkout under
-`build/loki-v3.7.1`. Normal release builds should use `make build-overlay`.
-
 ## Quick Start on AWS
 
-The quickest end-to-end validation uses:
+The default deployment path uses published artifacts:
 
-- one `loki-serverless-querier` image in ECR
-- one AWS Lambda function running `-mode=lambda-executor`
-- one persistent `loki-serverless-querier` deployment running
+- one published `loki-serverless-querier` image for the persistent querier
+- one published Lambda zip for the `provided.al2023` executor
+- one AWS Lambda function running the executor
+- one persistent `loki-serverless-querier` deployment running the image with
   `-mode=serverless-querier`
 - one S3 bucket/prefix for request and result payload references
 - an existing Loki object store and schema configuration
 
-### 1. Push the Image to ECR
+### 1. Set Deployment Variables
 
-Build the image for the same architecture you will use in Lambda:
-
-```bash
-make build-overlay LOKI_VERSION=v3.7.1 IMAGE=loki-serverless-querier:v3.7.1
-```
-
-Push it to ECR:
+Choose artifacts built for the same Loki version:
 
 ```bash
 AWS_REGION=us-east-1
-AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-ECR_REPO=loki-serverless-querier
-IMAGE_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:v3.7.1"
+AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 
-aws ecr create-repository \
-  --region "$AWS_REGION" \
-  --repository-name "$ECR_REPO"
+PROJECT_OWNER=zhiyu0729
+PROJECT_VERSION=v0.1.0
+LOKI_VERSION=v3.7.1
+LAMBDA_ARCH=arm64
 
-aws ecr get-login-password --region "$AWS_REGION" \
-  | docker login --username AWS --password-stdin \
-    "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+IMAGE_URI="ghcr.io/$PROJECT_OWNER/loki-serverless-querier:loki-$LOKI_VERSION-$PROJECT_VERSION"
+LAMBDA_ZIP="loki-serverless-querier-lambda-$LAMBDA_ARCH.zip"
 
-docker tag loki-serverless-querier:v3.7.1 "$IMAGE_URI"
-docker push "$IMAGE_URI"
+LAMBDA_FUNCTION=loki-store-query
+LAMBDA_ROLE_NAME=loki-store-query-lambda
+QUERIER_ROLE_NAME=loki-serverless-querier
+
+LOKI_DATA_BUCKET=loki-data-bucket
+RESULT_BUCKET=loki-serverless-query-results
+RESULT_PREFIX=loki-serverless-querier
+```
+
+Create the request/result bucket if you do not already have one:
+
+```bash
+if [ "$AWS_REGION" = "us-east-1" ]; then
+  aws s3api create-bucket --bucket "$RESULT_BUCKET" --region "$AWS_REGION"
+else
+  aws s3api create-bucket \
+    --bucket "$RESULT_BUCKET" \
+    --region "$AWS_REGION" \
+    --create-bucket-configuration LocationConstraint="$AWS_REGION"
+fi
+```
+
+Download the Lambda zip from the matching GitHub release:
+
+```bash
+curl -L \
+  -o "$LAMBDA_ZIP" \
+  "https://github.com/$PROJECT_OWNER/loki-serverless-querier/releases/download/$PROJECT_VERSION/$LAMBDA_ZIP"
 ```
 
 ### 2. Prepare the Lambda Loki Config
 
 The Lambda executor must load a Loki config that can read the same cold object
-store data as your normal querier. For the first validation, create a
-Lambda-specific config file and bake it into the image.
+store data as your normal querier. Keep the Lambda image immutable and provide
+the config at runtime.
 
 Example `lambda-config.yaml` shape:
 
@@ -195,108 +196,166 @@ serverless_store:
   enabled: false
 ```
 
-Create a small deployment image for Lambda. Save this as `Dockerfile.lambda`:
-
-```dockerfile
-ARG BASE_IMAGE
-FROM ${BASE_IMAGE}
-COPY lambda-config.yaml /etc/loki/config.yaml
-CMD ["-mode=lambda-executor"]
-```
-
-Build and push that image to ECR:
+Encode the config and inject it as a Lambda environment variable:
 
 ```bash
-LAMBDA_IMAGE_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:lambda-v3.7.1"
-
-docker build \
-  --build-arg BASE_IMAGE="$IMAGE_URI" \
-  -f Dockerfile.lambda \
-  -t "$LAMBDA_IMAGE_URI" \
-  .
-
-docker push "$LAMBDA_IMAGE_URI"
+CONFIG_B64="$(base64 < lambda-config.yaml | tr -d '\n')"
+test "${#CONFIG_B64}" -le 3500 || {
+  echo "lambda-config.yaml is too large for Lambda environment variables"
+  exit 1
+}
+LAMBDA_ENV="$(printf '{"Variables":{"LOKI_SERVERLESS_QUERIER_CONFIG_B64":"%s"}}' "$CONFIG_B64")"
 ```
 
-The executor reads the config from:
+The Lambda executor decodes this value to a temporary file under `/tmp` during
+startup and then loads it through Loki's normal `-config.file` path:
 
 ```text
-LOKI_SERVERLESS_QUERIER_CONFIG_FILE=/etc/loki/config.yaml
+LOKI_SERVERLESS_QUERIER_CONFIG_B64=<base64 encoded lambda-config.yaml>
+```
+
+If you mount a config file through another mechanism, such as EFS, use:
+
+```text
+LOKI_SERVERLESS_QUERIER_CONFIG_FILE=/path/to/config.yaml
 ```
 
 For very small configurations, you can use
-`LOKI_SERVERLESS_QUERIER_CONFIG_ARGS` instead, but a full Loki storage config is
-usually easier to manage as a file. If you use config args instead of a baked
-config file, set `LAMBDA_IMAGE_URI="$IMAGE_URI"` and keep the Lambda image
-command override as `["-mode=lambda-executor"]`.
+`LOKI_SERVERLESS_QUERIER_CONFIG_ARGS` instead. Keep the Lambda config minimal:
+AWS Lambda environment variables have a small total size limit, and base64
+encoding increases the size of the YAML content.
 
 ### 3. Create the Lambda Execution Role
 
-The Lambda execution role needs:
+Create the trust policy:
 
-- `logs:CreateLogGroup`
-- `logs:CreateLogStream`
-- `logs:PutLogEvents`
-- `s3:GetObject` and `s3:ListBucket` for Loki cold data
-- `s3:GetObject`, `s3:PutObject`, and `s3:DeleteObject` for the request/result
-  prefix
-
-Example policy skeleton:
-
-```json
+```bash
+cat > lambda-trust-policy.json <<'JSON'
 {
   "Version": "2012-10-17",
   "Statement": [
     {
       "Effect": "Allow",
-      "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
-      "Resource": "*"
-    },
+      "Principal": {
+        "Service": "lambda.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+JSON
+```
+
+Create the role and attach basic CloudWatch Logs permissions:
+
+```bash
+LAMBDA_ROLE_ARN="$(
+  aws iam create-role \
+    --role-name "$LAMBDA_ROLE_NAME" \
+    --assume-role-policy-document file://lambda-trust-policy.json \
+    --query 'Role.Arn' \
+    --output text
+)"
+
+aws iam attach-role-policy \
+  --role-name "$LAMBDA_ROLE_NAME" \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+```
+
+Attach the Loki cold data and request/result object permissions:
+
+```bash
+cat > lambda-loki-policy.json <<JSON
+{
+  "Version": "2012-10-17",
+  "Statement": [
     {
       "Effect": "Allow",
       "Action": ["s3:ListBucket"],
       "Resource": [
-        "arn:aws:s3:::loki-data-bucket",
-        "arn:aws:s3:::loki-serverless-query-results"
+        "arn:aws:s3:::$LOKI_DATA_BUCKET",
+        "arn:aws:s3:::$RESULT_BUCKET"
       ]
     },
     {
       "Effect": "Allow",
       "Action": ["s3:GetObject"],
-      "Resource": "arn:aws:s3:::loki-data-bucket/*"
+      "Resource": "arn:aws:s3:::$LOKI_DATA_BUCKET/*"
     },
     {
       "Effect": "Allow",
       "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
-      "Resource": "arn:aws:s3:::loki-serverless-query-results/loki-serverless-querier/*"
+      "Resource": "arn:aws:s3:::$RESULT_BUCKET/$RESULT_PREFIX/*"
     }
   ]
 }
+JSON
+
+aws iam put-role-policy \
+  --role-name "$LAMBDA_ROLE_NAME" \
+  --policy-name loki-store-query \
+  --policy-document file://lambda-loki-policy.json
 ```
 
 If your Loki storage uses KMS-encrypted buckets, add the required KMS permissions
-for the same keys.
+for the same keys. IAM role propagation can take a few seconds:
+
+```bash
+sleep 10
+```
 
 ### 4. Create the Lambda Function
 
-Create the function from the container image:
+Create the function from the `provided.al2023` zip package:
 
 ```bash
 aws lambda create-function \
   --region "$AWS_REGION" \
-  --function-name loki-store-query \
-  --package-type Image \
-  --code ImageUri="$LAMBDA_IMAGE_URI" \
+  --function-name "$LAMBDA_FUNCTION" \
+  --runtime provided.al2023 \
+  --handler bootstrap \
+  --zip-file "fileb://$LAMBDA_ZIP" \
   --role "$LAMBDA_ROLE_ARN" \
-  --architectures arm64 \
+  --architectures "$LAMBDA_ARCH" \
   --timeout 900 \
   --memory-size 8192 \
   --ephemeral-storage '{"Size":10240}' \
-  --image-config '{"Command":["-mode=lambda-executor"]}' \
-  --environment '{"Variables":{"LOKI_SERVERLESS_QUERIER_CONFIG_FILE":"/etc/loki/config.yaml"}}'
+  --environment "$LAMBDA_ENV"
 ```
 
-Use `x86_64` instead of `arm64` if the image was built for `linux/amd64`.
+Use `x86_64` instead of `arm64` if the zip was built with `TARGETARCH=amd64`.
+When the binary starts inside Lambda and `AWS_LAMBDA_RUNTIME_API` is present, it
+defaults to `lambda-executor` mode.
+
+Optionally cap fan-out at the Lambda level:
+
+```bash
+aws lambda put-function-concurrency \
+  --region "$AWS_REGION" \
+  --function-name "$LAMBDA_FUNCTION" \
+  --reserved-concurrent-executions 50
+```
+
+If you prefer Lambda container images, create the function with
+`--package-type Image`, `--code ImageUri="$IMAGE_URI"`, and
+`--image-config '{"Command":["-mode=lambda-executor"]}'`.
+
+Smoke-test Lambda startup:
+
+```bash
+aws lambda invoke \
+  --region "$AWS_REGION" \
+  --function-name "$LAMBDA_FUNCTION" \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{}' \
+  /tmp/loki-serverless-lambda-smoke.json
+
+cat /tmp/loki-serverless-lambda-smoke.json
+```
+
+A `bad_request` response saying that a request or request reference is required
+is expected for this smoke test. It means the executor initialized and reached
+the protocol handler.
 
 Recommended starting values:
 
@@ -340,10 +399,49 @@ The persistent querier's IAM role needs:
   prefix
 - normal Loki object store permissions if `fallback_on_failure` is enabled
 
+Attach the invoke and request/result object permissions to the role used by the
+persistent querier:
+
+```bash
+LAMBDA_FUNCTION_ARN="$(
+  aws lambda get-function \
+    --region "$AWS_REGION" \
+    --function-name "$LAMBDA_FUNCTION" \
+    --query 'Configuration.FunctionArn' \
+    --output text
+)"
+
+cat > querier-serverless-policy.json <<JSON
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "lambda:InvokeFunction",
+      "Resource": "$LAMBDA_FUNCTION_ARN"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::$RESULT_BUCKET/$RESULT_PREFIX/*"
+    }
+  ]
+}
+JSON
+
+aws iam put-role-policy \
+  --role-name "$QUERIER_ROLE_NAME" \
+  --policy-name loki-serverless-query \
+  --policy-document file://querier-serverless-policy.json
+```
+
 Run it as a querier:
 
 ```bash
-loki-serverless-querier \
+docker run --rm \
+  -p 3100:3100 \
+  -v "$PWD/loki-config.yaml:/etc/loki/config.yaml:ro" \
+  "$IMAGE_URI" \
   -mode=serverless-querier \
   -config.file=/etc/loki/config.yaml
 ```
@@ -432,13 +530,23 @@ The Lambda executor should receive a Loki config that can read the same cold
 object store data. If the same config enables `serverless_store`, the executor
 disables that wrapper internally to avoid recursive remote calls.
 
+Lambda executor config sources, in precedence order:
+
+- `LOKI_SERVERLESS_QUERIER_CONFIG_B64`: base64-encoded Loki YAML config,
+  restored to `/tmp` before Loki is initialized
+- `LOKI_SERVERLESS_QUERIER_CONFIG_ARGS`: inline Loki CLI flags for very small
+  configs
+- `LOKI_SERVERLESS_QUERIER_CONFIG_FILE`: local config file path, useful with EFS
+  or local smoke tests
+- command-line Loki flags passed after `-mode=lambda-executor`
+
 ## AWS Deployment Notes
 
 For AWS validation, use the same application image for both services:
 
 - ECS, Kubernetes, or another long-running environment for
   `-mode=serverless-querier`
-- AWS Lambda container image for `-mode=lambda-executor`
+- AWS Lambda `provided.al2023` zip or container image for the executor
 
 Recommended Lambda settings for initial testing:
 
@@ -462,8 +570,9 @@ The persistent querier role needs permissions to:
 AWS Lambda details to keep in mind:
 
 - container images must be in ECR and in the same Region as the function
-- the image must target one architecture, either `arm64` or `x86_64`
+- the image or zip must target one architecture, either `arm64` or `x86_64`
 - Lambda's maximum function timeout is 900 seconds
+- Lambda environment variables have a 4 KB total size quota
 - synchronous invoke request and response payloads are limited to 6 MB each
 - writable local storage is under `/tmp`, configurable from 512 MB to 10,240 MB
 
@@ -473,7 +582,39 @@ References:
 - [Lambda quotas](https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html)
 - [Configure Lambda function timeout](https://docs.aws.amazon.com/lambda/latest/dg/configuration-timeout.html)
 - [Configure ephemeral storage](https://docs.aws.amazon.com/lambda/latest/dg/configuration-ephemeral-storage.html)
+- [Building Lambda functions with Go](https://docs.aws.amazon.com/lambda/latest/dg/lambda-golang.html)
+- [Deploy Go Lambda functions with .zip file archives](https://docs.aws.amazon.com/lambda/latest/dg/golang-package.html)
 - [Lambda Invoke API](https://docs.aws.amazon.com/lambda/latest/api/API_Invoke.html)
+
+## Development Builds
+
+Most users should start from a published image and Lambda zip. Build locally
+only when changing the overlay or testing a Loki version that does not have a
+published artifact yet.
+
+Build the default Loki `v3.7.1` image:
+
+```bash
+make build-overlay LOKI_VERSION=v3.7.1 IMAGE=loki-serverless-querier:v3.7.1
+```
+
+For local development, build Linux binaries with the local Go toolchain and then
+package them into the final image:
+
+```bash
+SKIP_FETCH=1 make build-overlay-local LOKI_VERSION=v3.7.1 IMAGE=loki-serverless-querier:v3.7.1
+```
+
+The local build strategy requires an existing Loki checkout under
+`build/loki-v3.7.1`. Normal release builds should use `make build-overlay`.
+
+Build an AWS Lambda zip package for the `provided.al2023` runtime:
+
+```bash
+make build-lambda-zip LOKI_VERSION=v3.7.1 TARGETARCH=arm64
+```
+
+The zip contains a single executable named `bootstrap` at the archive root.
 
 ## Validation
 

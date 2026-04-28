@@ -37,7 +37,7 @@ func main() {
 		cfg.mode = firstEnv("LOKI_SERVERLESS_QUERIER_MODE", "SERVERLESS_LOKI_MODE")
 	}
 	if cfg.mode == "" {
-		cfg.mode = "serverless-querier"
+		cfg.mode = defaultMode()
 	}
 
 	log.Printf("starting loki-serverless-querier mode=%s loki_version=%s overlay_version=%s git_sha=%s", cfg.mode, lokiVersion, overlayVersion, gitSHA)
@@ -53,12 +53,19 @@ func main() {
 	case "serverless-querier":
 		runServerlessQuerier(cfg.lokiArgs)
 	case "lambda-executor":
-		runLambdaExecutor(ctx, cfg.once, cfg.inlineLimit)
+		runLambdaExecutor(ctx, cfg.once, cfg.inlineLimit, cfg.lokiArgs)
 	case "version":
 		fmt.Printf("loki_version=%s overlay_version=%s git_sha=%s\n", lokiVersion, overlayVersion, gitSHA)
 	default:
 		log.Fatalf("unknown mode %q; expected serverless-querier, lambda-executor, or version", cfg.mode)
 	}
+}
+
+func defaultMode() string {
+	if os.Getenv("AWS_LAMBDA_RUNTIME_API") != "" {
+		return "lambda-executor"
+	}
+	return "serverless-querier"
 }
 
 func parseCLI(args []string) (cliConfig, error) {
@@ -176,8 +183,8 @@ func hasTargetArg(args []string) bool {
 	return false
 }
 
-func runLambdaExecutor(ctx context.Context, once bool, inlineLimit int64) {
-	handler, err := newLambdaHandler(ctx, inlineLimit, lokiVersion, overlayVersion)
+func runLambdaExecutor(ctx context.Context, once bool, inlineLimit int64, lokiArgs []string) {
+	handler, err := newLambdaHandler(ctx, inlineLimit, lokiVersion, overlayVersion, lokiArgs)
 	if err != nil {
 		log.Fatalf("create lambda handler: %v", err)
 	}

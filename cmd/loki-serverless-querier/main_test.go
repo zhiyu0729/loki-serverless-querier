@@ -19,6 +19,20 @@ func TestParseCLIPreservesLokiArgs(t *testing.T) {
 	}
 }
 
+func TestDefaultModeUsesLambdaExecutorInsideLambda(t *testing.T) {
+	t.Setenv("AWS_LAMBDA_RUNTIME_API", "127.0.0.1:9001")
+	if mode := defaultMode(); mode != "lambda-executor" {
+		t.Fatalf("mode = %q", mode)
+	}
+}
+
+func TestDefaultModeUsesServerlessQuerierOutsideLambda(t *testing.T) {
+	t.Setenv("AWS_LAMBDA_RUNTIME_API", "")
+	if mode := defaultMode(); mode != "serverless-querier" {
+		t.Fatalf("mode = %q", mode)
+	}
+}
+
 func TestHasTargetArg(t *testing.T) {
 	if !hasTargetArg([]string{"-target=read"}) {
 		t.Fatal("expected inline target to be detected")

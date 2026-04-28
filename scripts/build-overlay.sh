@@ -12,14 +12,20 @@ BUILD_STRATEGY="${BUILD_STRATEGY:-docker}"
 TARGETOS="${TARGETOS:-linux}"
 TARGETARCH="${TARGETARCH:-$(go env GOARCH)}"
 SKIP_FETCH="${SKIP_FETCH:-0}"
+LAMBDA_ZIP="${LAMBDA_ZIP:-$WORK_DIR/dist/loki-serverless-querier-lambda-$TARGETARCH.zip}"
 
 if ! command -v git >/dev/null 2>&1; then
   echo "git is required" >&2
   exit 1
 fi
 
-if ! command -v docker >/dev/null 2>&1; then
+if [ "$BUILD_STRATEGY" != "lambda-zip" ] && ! command -v docker >/dev/null 2>&1; then
   echo "docker is required" >&2
+  exit 1
+fi
+
+if [ "$BUILD_STRATEGY" = "lambda-zip" ] && ! command -v zip >/dev/null 2>&1; then
+  echo "zip is required" >&2
   exit 1
 fi
 
@@ -55,6 +61,26 @@ apply_patch_dir() {
 
 apply_patch_dir "$ROOT_DIR/patches/common"
 apply_patch_dir "$ROOT_DIR/patches/$LOKI_VERSION"
+
+if [ "$BUILD_STRATEGY" = "lambda-zip" ]; then
+  mkdir -p "$WORK_DIR/dist"
+  mkdir -p "$(dirname "$LAMBDA_ZIP")"
+  GIT_SHA="$(git -C "$WORK_DIR" rev-parse --short HEAD)"
+  (
+    cd "$WORK_DIR"
+    CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -tags loki_serverless \
+      -trimpath \
+      -ldflags "-s -w -X main.lokiVersion=$LOKI_VERSION -X main.overlayVersion=$OVERLAY_VERSION -X main.gitSHA=$GIT_SHA -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.LokiVersion=$LOKI_VERSION -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.OverlayVersion=$OVERLAY_VERSION -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.GitSHA=$GIT_SHA" \
+      -o "$WORK_DIR/dist/bootstrap" \
+      ./cmd/loki-serverless-querier
+    chmod 0755 "$WORK_DIR/dist/bootstrap"
+    rm -f "$WORK_DIR/dist/loki-serverless-querier-lambda.zip"
+    (cd "$WORK_DIR/dist" && zip -q loki-serverless-querier-lambda.zip bootstrap)
+  )
+  mv "$WORK_DIR/dist/loki-serverless-querier-lambda.zip" "$LAMBDA_ZIP"
+  echo "built Lambda zip $LAMBDA_ZIP from Loki $LOKI_VERSION with overlay $OVERLAY_VERSION for $TARGETOS/$TARGETARCH"
+  exit 0
+fi
 
 if [ "$BUILD_STRATEGY" = "local" ]; then
   mkdir -p "$WORK_DIR/dist"
