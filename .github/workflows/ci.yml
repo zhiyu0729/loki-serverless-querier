@@ -1,0 +1,173 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+      - "loki-v*"
+  workflow_dispatch:
+    inputs:
+      loki_version:
+        description: "Loki tag to build the overlay against"
+        required: true
+        default: "v3.7.1"
+        type: string
+      target_arch:
+        description: "Linux architecture for the image build"
+        required: true
+        default: "amd64"
+        type: choice
+        options:
+          - amd64
+          - arm64
+      publish_image:
+        description: "Push the built image to GHCR"
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEFAULT_LOKI_VERSION: v3.7.1
+  DEFAULT_TARGET_ARCH: amd64
+  GO_VERSION: 1.25.7
+
+jobs:
+  test:
+    name: Test Overlay
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go.mod
+
+      - name: Verify
+        run: make verify
+
+  image:
+    name: Build Image
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go.mod
+
+      - name: Resolve build metadata
+        id: meta
+        env:
+          INPUT_LOKI_VERSION: ${{ inputs.loki_version }}
+          INPUT_TARGET_ARCH: ${{ inputs.target_arch }}
+          INPUT_PUBLISH_IMAGE: ${{ inputs.publish_image }}
+        run: |
+          set -euo pipefail
+
+          slugify() {
+            tr '[:upper:]' '[:lower:]' \
+              | sed -E 's/[^a-z0-9_.-]+/-/g; s/^-+//; s/-+$//'
+          }
+
+          loki_version="${INPUT_LOKI_VERSION:-${DEFAULT_LOKI_VERSION}}"
+          target_arch="${INPUT_TARGET_ARCH:-${DEFAULT_TARGET_ARCH}}"
+          image_repo="$(printf 'ghcr.io/%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          short_sha="${GITHUB_SHA::12}"
+          loki_slug="$(printf '%s' "$loki_version" | slugify)"
+          ref_slug="$(printf '%s' "$GITHUB_REF_NAME" | slugify)"
+
+          primary_tag="$image_repo:loki-$loki_slug-sha-$short_sha"
+          tags=("$primary_tag")
+
+          if [ "$GITHUB_REF_TYPE" = "branch" ]; then
+            tags+=("$image_repo:loki-$loki_slug-$ref_slug")
+          elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            tags+=("$image_repo:loki-$loki_slug-$ref_slug")
+          else
+            tags+=("$image_repo:loki-$loki_slug-manual-$short_sha")
+          fi
+
+          publish_image="false"
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+              publish_image="true"
+            elif [ "$GITHUB_REF_NAME" = "main" ]; then
+              publish_image="true"
+            elif [[ "$GITHUB_REF_NAME" == loki/* || "$GITHUB_REF_NAME" == release/* ]]; then
+              publish_image="true"
+            fi
+          elif [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$INPUT_PUBLISH_IMAGE" = "true" ]; then
+            publish_image="true"
+          fi
+
+          {
+            echo "loki_version=$loki_version"
+            echo "target_arch=$target_arch"
+            echo "primary_tag=$primary_tag"
+            echo "overlay_version=${GITHUB_REF_NAME:-manual}-$short_sha"
+            echo "publish_image=$publish_image"
+            echo "tags<<EOF"
+            printf '%s\n' "${tags[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        if: steps.meta.outputs.publish_image == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build overlay image
+        env:
+          LOKI_VERSION: ${{ steps.meta.outputs.loki_version }}
+          TARGETARCH: ${{ steps.meta.outputs.target_arch }}
+          IMAGE: ${{ steps.meta.outputs.primary_tag }}
+          OVERLAY_VERSION: ${{ steps.meta.outputs.overlay_version }}
+          GO_VERSION: ${{ env.GO_VERSION }}
+        run: make build-overlay-local
+
+      - name: Tag image aliases
+        run: |
+          set -euo pipefail
+          primary_tag="${{ steps.meta.outputs.primary_tag }}"
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            [ "$tag" = "$primary_tag" ] && continue
+            docker tag "$primary_tag" "$tag"
+          done <<'EOF'
+          ${{ steps.meta.outputs.tags }}
+          EOF
+
+      - name: Push image tags
+        if: steps.meta.outputs.publish_image == 'true'
+        run: |
+          set -euo pipefail
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            docker push "$tag"
+          done <<'EOF'
+          ${{ steps.meta.outputs.tags }}
+          EOF

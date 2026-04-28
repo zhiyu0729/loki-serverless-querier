@@ -1,0 +1,6 @@
+/build/
+/dist/
+/tmp/
+/.cache/
+/serverless-loki
+/loki-serverless-querier

@@ -1,0 +1,17 @@
+FROM gcr.io/distroless/static-debian12:nonroot
+
+ARG LOKI_VERSION=unknown
+ARG OVERLAY_VERSION=dev
+ARG GIT_SHA=unknown
+
+LABEL org.opencontainers.image.title="loki-serverless-querier"
+LABEL org.opencontainers.image.version="${LOKI_VERSION}"
+LABEL org.opencontainers.image.revision="${GIT_SHA}"
+LABEL dev.loki-serverless-querier.overlay-version="${OVERLAY_VERSION}"
+
+COPY dist/loki-serverless-querier /usr/bin/loki-serverless-querier
+COPY dist/loki /usr/bin/loki
+
+USER nonroot:nonroot
+ENTRYPOINT ["/usr/bin/loki-serverless-querier"]
+CMD ["-mode=serverless-querier"]
