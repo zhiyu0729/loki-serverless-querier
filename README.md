@@ -367,8 +367,7 @@ aws lambda create-function \
   --role "$LAMBDA_ROLE_ARN" \
   --architectures "$LAMBDA_ARCH" \
   --timeout 900 \
-  --memory-size 8192 \
-  --ephemeral-storage '{"Size":10240}' \
+  --memory-size 3072 \
   --environment "$LAMBDA_ENV"
 ```
 
@@ -409,8 +408,9 @@ the protocol handler.
 Recommended starting values:
 
 - timeout: `900`
-- memory: `4096` to `8192`
-- ephemeral storage: `10240`
+- memory: `3072`
+- ephemeral storage: keep the Lambda default unless `/tmp` usage becomes a
+  bottleneck
 - reserved concurrency: set this if you want a hard cap on query fan-out
 
 ### 5. Configure the Persistent Querier
@@ -601,8 +601,9 @@ Recommended Lambda settings for initial testing:
 
 - architecture: match the image architecture
 - timeout: 900 seconds
-- memory: start with 4096 MB or 8192 MB
-- ephemeral storage: start with 10 GB
+- memory: start with 3072 MB, roughly matching a 1.5 CPU / 3 GiB querier shape
+- ephemeral storage: keep the default unless the local index/cache path needs
+  more `/tmp` space
 
 The Lambda role needs permissions to:
 
@@ -622,6 +623,8 @@ AWS Lambda details to keep in mind:
 - the image or zip must target one architecture, either `arm64` or `x86_64`
 - Lambda's maximum function timeout is 900 seconds
 - Lambda environment variables have a 4 KB total size quota
+- Lambda allocates CPU proportionally to memory; 1,769 MB is equivalent to one
+  vCPU, so 3 GiB is a reasonable first Lambda size for this executor
 - synchronous invoke request and response payloads are limited to 6 MB each
 - writable local storage is under `/tmp`, configurable from 512 MB to 10,240 MB
 
