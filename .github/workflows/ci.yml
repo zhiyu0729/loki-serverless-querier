@@ -69,7 +69,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
     permissions:
-      contents: read
+      contents: write
       packages: write
     steps:
       - name: Checkout
@@ -167,8 +167,24 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: loki-serverless-querier-lambda-${{ steps.meta.outputs.loki_version }}-${{ steps.meta.outputs.target_arch }}
-          path: build/loki-${{ steps.meta.outputs.loki_version }}/dist/loki-serverless-querier-lambda-${{ steps.meta.outputs.target_arch }}.zip
+          path: build/loki-${{ steps.meta.outputs.loki_version }}/dist/bootstrap
           if-no-files-found: error
+
+      - name: Upload Lambda zip to release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LOKI_VERSION: ${{ steps.meta.outputs.loki_version }}
+          TARGETARCH: ${{ steps.meta.outputs.target_arch }}
+        run: |
+          set -euo pipefail
+          zip_path="build/loki-$LOKI_VERSION/dist/loki-serverless-querier-lambda-$TARGETARCH.zip"
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --notes "loki-serverless-querier release for Loki $LOKI_VERSION"
+          fi
+          gh release upload "$GITHUB_REF_NAME" "$zip_path" --clobber
 
       - name: Tag image aliases
         run: |

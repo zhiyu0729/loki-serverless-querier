@@ -217,6 +217,11 @@ curl -L \
   "https://github.com/$PROJECT_OWNER/loki-serverless-querier/releases/download/$PROJECT_VERSION/$LAMBDA_ZIP"
 ```
 
+Upload this zip to Lambda as-is. Do not extract it. The archive must contain
+`bootstrap` at the zip root. If you download from a GitHub Actions artifact
+instead of a GitHub Release, make sure the downloaded zip contains `bootstrap`
+directly and not another `.zip` file.
+
 ### 2. Prepare the Lambda Loki Config
 
 The Lambda executor must load a Loki config that can read the same cold object
