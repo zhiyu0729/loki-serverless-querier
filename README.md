@@ -132,17 +132,66 @@ RESULT_BUCKET=loki-serverless-query-results
 RESULT_PREFIX=loki-serverless-querier
 ```
 
-Create the request/result bucket if you do not already have one:
+Create the request/result bucket if it does not already exist in your account:
 
 ```bash
-if [ "$AWS_REGION" = "us-east-1" ]; then
-  aws s3api create-bucket --bucket "$RESULT_BUCKET" --region "$AWS_REGION"
+if aws s3api head-bucket --bucket "$RESULT_BUCKET" 2>/dev/null; then
+  echo "Using existing bucket: $RESULT_BUCKET"
 else
-  aws s3api create-bucket \
-    --bucket "$RESULT_BUCKET" \
-    --region "$AWS_REGION" \
-    --create-bucket-configuration LocationConstraint="$AWS_REGION"
+  if [ "$AWS_REGION" = "us-east-1" ]; then
+    aws s3api create-bucket --bucket "$RESULT_BUCKET" --region "$AWS_REGION"
+  else
+    aws s3api create-bucket \
+      --bucket "$RESULT_BUCKET" \
+      --region "$AWS_REGION" \
+      --create-bucket-configuration LocationConstraint="$AWS_REGION"
+  fi
 fi
+```
+
+Initialize and verify the request/result prefix. S3 prefixes are virtual, so
+this marker object is only a deployment-time sanity check that the prefix value
+is correct and the bucket is writable:
+
+```bash
+aws s3api put-object \
+  --bucket "$RESULT_BUCKET" \
+  --key "$RESULT_PREFIX/.keep" \
+  --body /dev/null
+
+aws s3api head-object \
+  --bucket "$RESULT_BUCKET" \
+  --key "$RESULT_PREFIX/.keep" >/dev/null
+```
+
+Configure lifecycle cleanup for request/result payloads. Tune the expiration
+window for your operational needs; `7` days is a practical starting point for
+debugging failed queries without keeping temporary objects forever:
+
+```bash
+cat > loki-serverless-lifecycle.json <<JSON
+{
+  "Rules": [
+    {
+      "ID": "expire-loki-serverless-query-payloads",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "$RESULT_PREFIX/"
+      },
+      "Expiration": {
+        "Days": 7
+      },
+      "AbortIncompleteMultipartUpload": {
+        "DaysAfterInitiation": 1
+      }
+    }
+  ]
+}
+JSON
+
+aws s3api put-bucket-lifecycle-configuration \
+  --bucket "$RESULT_BUCKET" \
+  --lifecycle-configuration file://loki-serverless-lifecycle.json
 ```
 
 Download the Lambda zip from the matching GitHub release:
