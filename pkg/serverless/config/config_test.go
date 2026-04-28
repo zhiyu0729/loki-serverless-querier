@@ -24,6 +24,26 @@ func TestStoreConfigDefaultsAndValidate(t *testing.T) {
 	}
 }
 
+func TestStoreConfigAllowsEmptyObjectStorePrefix(t *testing.T) {
+	cfg := StoreConfig{
+		Enabled: true,
+		AWS: AWSConfig{
+			LambdaFunctionName: "loki-store-query",
+		},
+		ObjectStore: ObjectStoreConfig{
+			Bucket: "loki-serverless-querier-results",
+			Prefix: "",
+		},
+	}
+	cfg.SetDefaults()
+	if cfg.ObjectStore.Prefix != "" {
+		t.Fatalf("prefix = %q", cfg.ObjectStore.Prefix)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate config: %v", err)
+	}
+}
+
 func TestStoreConfigRejectsInvalidIntervals(t *testing.T) {
 	cfg := StoreConfig{
 		Enabled: true,

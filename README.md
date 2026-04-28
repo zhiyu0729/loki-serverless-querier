@@ -124,13 +124,24 @@ LAMBDA_ARCH=x86_64
 IMAGE_URI="ghcr.io/$PROJECT_OWNER/loki-serverless-querier:loki-$LOKI_VERSION-$PROJECT_VERSION"
 LAMBDA_ZIP="loki-serverless-querier-lambda-$LAMBDA_GOARCH.zip"
 
-LAMBDA_FUNCTION=loki-store-query
+LAMBDA_FUNCTION_NAME=loki-store-query
 LAMBDA_ROLE_NAME=loki-store-query-lambda
 QUERIER_ROLE_NAME=loki-serverless-querier
 
 LOKI_DATA_BUCKET=loki-data-bucket
 RESULT_BUCKET=loki-serverless-query-results
 RESULT_PREFIX=loki-serverless-querier
+# Set RESULT_PREFIX="" only when RESULT_BUCKET is dedicated to temporary
+# loki-serverless-querier request/result objects.
+
+if [ -n "$RESULT_PREFIX" ]; then
+  RESULT_PREFIX="${RESULT_PREFIX%/}"
+  RESULT_KEY_PREFIX="$RESULT_PREFIX/"
+  RESULT_OBJECT_ARN="arn:aws:s3:::$RESULT_BUCKET/$RESULT_PREFIX/*"
+else
+  RESULT_KEY_PREFIX=""
+  RESULT_OBJECT_ARN="arn:aws:s3:::$RESULT_BUCKET/*"
+fi
 ```
 
 Create the request/result bucket if it does not already exist in your account:
@@ -157,17 +168,20 @@ is correct and the bucket is writable:
 ```bash
 aws s3api put-object \
   --bucket "$RESULT_BUCKET" \
-  --key "$RESULT_PREFIX/.keep" \
+  --key "${RESULT_KEY_PREFIX}.keep" \
   --body /dev/null
 
 aws s3api head-object \
   --bucket "$RESULT_BUCKET" \
-  --key "$RESULT_PREFIX/.keep" >/dev/null
+  --key "${RESULT_KEY_PREFIX}.keep" >/dev/null
 ```
 
 Configure lifecycle cleanup for request/result payloads. Tune the expiration
 window for your operational needs; `7` days is a practical starting point for
 debugging failed queries without keeping temporary objects forever:
+
+If `RESULT_PREFIX` is empty, this lifecycle rule applies to the whole
+`RESULT_BUCKET`. Use a dedicated bucket in that case.
 
 ```bash
 cat > loki-serverless-lifecycle.json <<JSON
@@ -177,10 +191,10 @@ cat > loki-serverless-lifecycle.json <<JSON
       "ID": "expire-loki-serverless-query-payloads",
       "Status": "Enabled",
       "Filter": {
-        "Prefix": "$RESULT_PREFIX/"
+        "Prefix": "$RESULT_KEY_PREFIX"
       },
       "Expiration": {
-        "Days": 7
+        "Days": 1
       },
       "AbortIncompleteMultipartUpload": {
         "DaysAfterInitiation": 1
@@ -335,7 +349,7 @@ cat > lambda-loki-policy.json <<JSON
     {
       "Effect": "Allow",
       "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
-      "Resource": "arn:aws:s3:::$RESULT_BUCKET/$RESULT_PREFIX/*"
+      "Resource": "$RESULT_OBJECT_ARN"
     }
   ]
 }
@@ -361,7 +375,7 @@ Create the function from the `provided.al2023` zip package:
 ```bash
 aws lambda create-function \
   --region "$AWS_REGION" \
-  --function-name "$LAMBDA_FUNCTION" \
+  --function-name "$LAMBDA_FUNCTION_NAME" \
   --runtime provided.al2023 \
   --handler bootstrap \
   --zip-file "fileb://$LAMBDA_ZIP" \
@@ -383,7 +397,7 @@ Optionally cap fan-out at the Lambda level:
 ```bash
 aws lambda put-function-concurrency \
   --region "$AWS_REGION" \
-  --function-name "$LAMBDA_FUNCTION" \
+  --function-name "$LAMBDA_FUNCTION_NAME" \
   --reserved-concurrent-executions 50
 ```
 
@@ -396,7 +410,7 @@ Smoke-test Lambda startup:
 ```bash
 aws lambda invoke \
   --region "$AWS_REGION" \
-  --function-name "$LAMBDA_FUNCTION" \
+  --function-name "$LAMBDA_FUNCTION_NAME" \
   --cli-binary-format raw-in-base64-out \
   --payload '{}' \
   /tmp/loki-serverless-lambda-smoke.json
@@ -455,10 +469,10 @@ Attach the invoke and request/result object permissions to the role used by the
 persistent querier:
 
 ```bash
-LAMBDA_FUNCTION_ARN="$(
+LAMBDA_FUNCTION_NAME_ARN="$(
   aws lambda get-function \
     --region "$AWS_REGION" \
-    --function-name "$LAMBDA_FUNCTION" \
+    --function-name "$LAMBDA_FUNCTION_NAME" \
     --query 'Configuration.FunctionArn' \
     --output text
 )"
@@ -470,12 +484,12 @@ cat > querier-serverless-policy.json <<JSON
     {
       "Effect": "Allow",
       "Action": "lambda:InvokeFunction",
-      "Resource": "$LAMBDA_FUNCTION_ARN"
+      "Resource": "$LAMBDA_FUNCTION_NAME_ARN"
     },
     {
       "Effect": "Allow",
       "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
-      "Resource": "arn:aws:s3:::$RESULT_BUCKET/$RESULT_PREFIX/*"
+      "Resource": "$RESULT_OBJECT_ARN"
     }
   ]
 }
@@ -568,6 +582,10 @@ serverless_store:
   inline_response_limit_bytes: 4194304
   fallback_on_failure: true
 ```
+
+If `RESULT_PREFIX` is empty, set `object_store.prefix: ""` as well. In that
+case request/result objects are written at the bucket root, so use a dedicated
+bucket and lifecycle rule.
 
 Equivalent flags are also registered under `serverless.store.*`, for example:
 

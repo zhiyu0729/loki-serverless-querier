@@ -67,9 +67,6 @@ func (c *StoreConfig) SetDefaults() {
 	if c.ObjectStore.Type == "" {
 		c.ObjectStore.Type = ObjectStoreS3
 	}
-	if c.ObjectStore.Prefix == "" {
-		c.ObjectStore.Prefix = "loki-serverless-querier"
-	}
 	if c.MaxInterval == 0 {
 		c.MaxInterval = DefaultMaxInterval
 	}
