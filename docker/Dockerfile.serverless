@@ -6,16 +6,17 @@ WORKDIR /src
 ARG LOKI_VERSION=unknown
 ARG OVERLAY_VERSION=dev
 ARG GIT_SHA=unknown
+ARG GO_BUILD_TAGS=loki_serverless
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux go build -tags loki_serverless \
+RUN CGO_ENABLED=0 GOOS=linux go build -tags "${GO_BUILD_TAGS}" \
     -trimpath \
     -ldflags "-s -w -X main.lokiVersion=${LOKI_VERSION} -X main.overlayVersion=${OVERLAY_VERSION} -X main.gitSHA=${GIT_SHA} -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.LokiVersion=${LOKI_VERSION} -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.OverlayVersion=${OVERLAY_VERSION} -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.GitSHA=${GIT_SHA}" \
     -o /out/loki-serverless-querier \
     ./cmd/loki-serverless-querier
 
-RUN CGO_ENABLED=0 GOOS=linux go build -tags loki_serverless \
+RUN CGO_ENABLED=0 GOOS=linux go build -tags "${GO_BUILD_TAGS}" \
     -trimpath \
     -ldflags "-s -w -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.LokiVersion=${LOKI_VERSION} -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.OverlayVersion=${OVERLAY_VERSION} -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.GitSHA=${GIT_SHA}" \
     -o /out/loki \

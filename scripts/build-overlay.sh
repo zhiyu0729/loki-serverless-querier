@@ -8,6 +8,7 @@ WORK_DIR="${WORK_DIR:-$ROOT_DIR/build/loki-$LOKI_VERSION}"
 IMAGE="${IMAGE:-loki-serverless-querier:$LOKI_VERSION}"
 OVERLAY_VERSION="${OVERLAY_VERSION:-dev}"
 GO_VERSION="${GO_VERSION:-1.25.7}"
+GO_BUILD_TAGS="${GO_BUILD_TAGS:-loki_serverless}"
 BUILD_STRATEGY="${BUILD_STRATEGY:-docker}"
 TARGETOS="${TARGETOS:-linux}"
 TARGETARCH="${TARGETARCH:-$(go env GOARCH)}"
@@ -62,16 +63,46 @@ apply_patch_dir() {
 apply_patch_dir "$ROOT_DIR/patches/common"
 apply_patch_dir "$ROOT_DIR/patches/$LOKI_VERSION"
 
+go_build() {
+  local tags="$1"
+  local output="$2"
+  local ldflags="$3"
+  local package="$4"
+
+  CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -tags "$tags" \
+    -trimpath \
+    -ldflags "$ldflags" \
+    -o "$output" \
+    "$package"
+}
+
+go_build_with_fallback() {
+  local output="$1"
+  local ldflags="$2"
+  local package="$3"
+
+  if go_build "$GO_BUILD_TAGS" "$output" "$ldflags" "$package"; then
+    return 0
+  fi
+
+  if [ "$GO_BUILD_TAGS" = "loki_serverless" ] && [ "$TARGETARCH" = "amd64" ]; then
+    echo "retrying build with loki_serverless noasm nosimd tags for amd64" >&2
+    go_build "loki_serverless noasm nosimd" "$output" "$ldflags" "$package"
+    return
+  fi
+
+  return 1
+}
+
 if [ "$BUILD_STRATEGY" = "lambda-zip" ]; then
   mkdir -p "$WORK_DIR/dist"
   mkdir -p "$(dirname "$LAMBDA_ZIP")"
   GIT_SHA="$(git -C "$WORK_DIR" rev-parse --short HEAD)"
   (
     cd "$WORK_DIR"
-    CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -tags loki_serverless \
-      -trimpath \
-      -ldflags "-s -w -X main.lokiVersion=$LOKI_VERSION -X main.overlayVersion=$OVERLAY_VERSION -X main.gitSHA=$GIT_SHA -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.LokiVersion=$LOKI_VERSION -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.OverlayVersion=$OVERLAY_VERSION -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.GitSHA=$GIT_SHA" \
-      -o "$WORK_DIR/dist/bootstrap" \
+    go_build_with_fallback \
+      "$WORK_DIR/dist/bootstrap" \
+      "-s -w -X main.lokiVersion=$LOKI_VERSION -X main.overlayVersion=$OVERLAY_VERSION -X main.gitSHA=$GIT_SHA -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.LokiVersion=$LOKI_VERSION -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.OverlayVersion=$OVERLAY_VERSION -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.GitSHA=$GIT_SHA" \
       ./cmd/loki-serverless-querier
     chmod 0755 "$WORK_DIR/dist/bootstrap"
     rm -f "$WORK_DIR/dist/loki-serverless-querier-lambda.zip"
@@ -87,15 +118,13 @@ if [ "$BUILD_STRATEGY" = "local" ]; then
   GIT_SHA="$(git -C "$WORK_DIR" rev-parse --short HEAD)"
   (
     cd "$WORK_DIR"
-    CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -tags loki_serverless \
-      -trimpath \
-      -ldflags "-s -w -X main.lokiVersion=$LOKI_VERSION -X main.overlayVersion=$OVERLAY_VERSION -X main.gitSHA=$GIT_SHA -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.LokiVersion=$LOKI_VERSION -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.OverlayVersion=$OVERLAY_VERSION -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.GitSHA=$GIT_SHA" \
-      -o "$WORK_DIR/dist/loki-serverless-querier" \
+    go_build_with_fallback \
+      "$WORK_DIR/dist/loki-serverless-querier" \
+      "-s -w -X main.lokiVersion=$LOKI_VERSION -X main.overlayVersion=$OVERLAY_VERSION -X main.gitSHA=$GIT_SHA -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.LokiVersion=$LOKI_VERSION -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.OverlayVersion=$OVERLAY_VERSION -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.GitSHA=$GIT_SHA" \
       ./cmd/loki-serverless-querier
-    CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -tags loki_serverless \
-      -trimpath \
-      -ldflags "-s -w -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.LokiVersion=$LOKI_VERSION -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.OverlayVersion=$OVERLAY_VERSION -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.GitSHA=$GIT_SHA" \
-      -o "$WORK_DIR/dist/loki" \
+    go_build_with_fallback \
+      "$WORK_DIR/dist/loki" \
+      "-s -w -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.LokiVersion=$LOKI_VERSION -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.OverlayVersion=$OVERLAY_VERSION -X github.com/grafana/loki/v3/pkg/serverless/buildinfo.GitSHA=$GIT_SHA" \
       ./cmd/loki
   )
   docker build \
@@ -118,6 +147,7 @@ docker build \
   --build-arg "OVERLAY_VERSION=$OVERLAY_VERSION" \
   --build-arg "GIT_SHA=$(git -C "$WORK_DIR" rev-parse --short HEAD)" \
   --build-arg "GO_VERSION=$GO_VERSION" \
+  --build-arg "GO_BUILD_TAGS=$GO_BUILD_TAGS" \
   --label "org.opencontainers.image.version=$LOKI_VERSION" \
   --label "dev.loki-serverless-querier.overlay-version=$OVERLAY_VERSION" \
   --tag "$IMAGE" \

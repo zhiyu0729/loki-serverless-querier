@@ -62,6 +62,75 @@ func TestRunnerUsesSplitIntervalForSamples(t *testing.T) {
 	}
 }
 
+func TestRunnerClearsEmptyStoreChunkOverrideForLogs(t *testing.T) {
+	store := &captureStore{}
+	runner := New(store)
+	start := time.Unix(100, 0).UTC()
+	end := time.Unix(200, 0).UTC()
+
+	req := serverlessRequest(t, protocol.OperationSelectLogs, &logproto.QueryRequest{
+		Selector:    `{app="api"}`,
+		Direction:   logproto.FORWARD,
+		Limit:       10,
+		StoreChunks: &logproto.ChunkRefGroup{},
+	}, start, end)
+
+	if _, err := runner.RunStoreOnly(context.Background(), req); err != nil {
+		t.Fatalf("RunStoreOnly returned error: %v", err)
+	}
+	if store.logStoreChunks != nil {
+		t.Fatalf("log store chunk override = %#v, want nil", store.logStoreChunks)
+	}
+}
+
+func TestRunnerPreservesNonEmptyStoreChunkOverrideForLogs(t *testing.T) {
+	store := &captureStore{}
+	runner := New(store)
+	start := time.Unix(100, 0).UTC()
+	end := time.Unix(200, 0).UTC()
+	storeChunks := &logproto.ChunkRefGroup{
+		Refs: []*logproto.ChunkRef{{
+			Fingerprint: 1,
+			UserID:      "tenant-a",
+			From:        model.TimeFromUnix(90),
+			Through:     model.TimeFromUnix(210),
+		}},
+	}
+
+	req := serverlessRequest(t, protocol.OperationSelectLogs, &logproto.QueryRequest{
+		Selector:    `{app="api"}`,
+		Direction:   logproto.FORWARD,
+		Limit:       10,
+		StoreChunks: storeChunks,
+	}, start, end)
+
+	if _, err := runner.RunStoreOnly(context.Background(), req); err != nil {
+		t.Fatalf("RunStoreOnly returned error: %v", err)
+	}
+	if store.logStoreChunks != storeChunks {
+		t.Fatalf("log store chunk override = %#v, want %#v", store.logStoreChunks, storeChunks)
+	}
+}
+
+func TestRunnerClearsEmptyStoreChunkOverrideForSamples(t *testing.T) {
+	store := &captureStore{}
+	runner := New(store)
+	start := time.Unix(300, 0).UTC()
+	end := time.Unix(400, 0).UTC()
+
+	req := serverlessRequest(t, protocol.OperationSelectSamples, &logproto.SampleQueryRequest{
+		Selector:    `rate({app="api"}[1m])`,
+		StoreChunks: &logproto.ChunkRefGroup{},
+	}, start, end)
+
+	if _, err := runner.RunStoreOnly(context.Background(), req); err != nil {
+		t.Fatalf("RunStoreOnly returned error: %v", err)
+	}
+	if store.sampleStoreChunks != nil {
+		t.Fatalf("sample store chunk override = %#v, want nil", store.sampleStoreChunks)
+	}
+}
+
 func serverlessRequest(t *testing.T, operation string, msg proto.Message, start, end time.Time) protocol.ServerlessQueryRequest {
 	t.Helper()
 	body, err := proto.Marshal(msg)
@@ -87,17 +156,22 @@ type captureStore struct {
 	logEnd      time.Time
 	sampleStart time.Time
 	sampleEnd   time.Time
+
+	logStoreChunks    *logproto.ChunkRefGroup
+	sampleStoreChunks *logproto.ChunkRefGroup
 }
 
 func (s *captureStore) SelectLogs(_ context.Context, req logql.SelectLogParams) (iter.EntryIterator, error) {
 	s.logStart = req.Start
 	s.logEnd = req.End
+	s.logStoreChunks = req.StoreChunks
 	return iter.NoopEntryIterator, nil
 }
 
 func (s *captureStore) SelectSamples(_ context.Context, req logql.SelectSampleParams) (iter.SampleIterator, error) {
 	s.sampleStart = req.Start
 	s.sampleEnd = req.End
+	s.sampleStoreChunks = req.StoreChunks
 	return iter.NoopSampleIterator, nil
 }
 

@@ -34,6 +34,9 @@ func newLambdaHandler(ctx context.Context, inlineLimit int64, lokiVersion, overl
 
 	validation.SetDefaultLimitsForYAMLUnmarshalling(wrapper.LimitsConfig)
 	loki_runtime.SetDefaultLimitsForYAMLUnmarshalling(wrapper.OperationalConfig)
+	if err := prepareLambdaLokiConfig(&wrapper); err != nil {
+		return nil, err
+	}
 
 	storeCfg := wrapper.Config.ServerlessStore
 	storeCfg.SetDefaults()
@@ -56,6 +59,23 @@ func newLambdaHandler(ctx context.Context, inlineLimit int64, lokiVersion, overl
 	}
 
 	return lambdaexec.NewHandler(lokirunner.New(t.Store), resultStore, resultStore, inlineLimit, lokiVersion, overlayVersion), nil
+}
+
+func prepareLambdaLokiConfig(wrapper *loki.ConfigWrapper) error {
+	const loopbackAddr = "127.0.0.1"
+	if wrapper.Config.Common.InstanceAddr == "" {
+		wrapper.Config.Common.InstanceAddr = loopbackAddr
+	}
+	if wrapper.Config.Common.Ring.InstanceAddr == "" {
+		wrapper.Config.Common.Ring.InstanceAddr = wrapper.Config.Common.InstanceAddr
+	}
+	if wrapper.Config.MemberlistKV.AdvertiseAddr == "" {
+		wrapper.Config.MemberlistKV.AdvertiseAddr = wrapper.Config.Common.InstanceAddr
+	}
+	if err := wrapper.Config.SchemaConfig.Validate(); err != nil {
+		return fmt.Errorf("validate schema config: %w", err)
+	}
+	return nil
 }
 
 func lokiConfigArgs(fallbackArgs []string) ([]string, error) {

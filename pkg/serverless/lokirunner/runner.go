@@ -52,6 +52,7 @@ func (r *Runner) runSelectLogs(ctx context.Context, req protocol.ServerlessQuery
 	}
 	queryReq.Start = req.StartTime()
 	queryReq.End = req.EndTime()
+	clearEmptyStoreChunks(&queryReq.StoreChunks)
 	it, err := r.store.SelectLogs(ctx, logql.SelectLogParams{QueryRequest: &queryReq})
 	if err != nil {
 		return nil, err
@@ -72,6 +73,7 @@ func (r *Runner) runSelectSamples(ctx context.Context, req protocol.ServerlessQu
 	}
 	sampleReq.Start = req.StartTime()
 	sampleReq.End = req.EndTime()
+	clearEmptyStoreChunks(&sampleReq.StoreChunks)
 	it, err := r.store.SelectSamples(ctx, logql.SelectSampleParams{SampleQueryRequest: &sampleReq})
 	if err != nil {
 		return nil, err
@@ -97,6 +99,12 @@ func decodeLokiRequest(req protocol.ServerlessQueryRequest, msg proto.Message) e
 		return fmt.Errorf("unmarshal loki request: %w", err)
 	}
 	return nil
+}
+
+func clearEmptyStoreChunks(storeChunks **logproto.ChunkRefGroup) {
+	if *storeChunks != nil && len((*storeChunks).Refs) == 0 {
+		*storeChunks = nil
+	}
 }
 
 func collectLogs(it iter.EntryIterator) (*logproto.QueryResponse, error) {

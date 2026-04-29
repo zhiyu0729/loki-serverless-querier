@@ -239,6 +239,7 @@ server:
 
 common:
   path_prefix: /tmp/loki
+  instance_addr: 127.0.0.1
   replication_factor: 1
   ring:
     kvstore:
@@ -282,6 +283,10 @@ startup and then loads it through Loki's normal `-config.file` path:
 ```text
 LOKI_SERVERLESS_QUERIER_CONFIG_B64=<base64 encoded lambda-config.yaml>
 ```
+
+The `common.instance_addr` value keeps Loki's internal memberlist dependency
+from trying to discover a Lambda network interface. The executor also defaults
+this to `127.0.0.1` if it is omitted.
 
 If you mount a config file through another mechanism, such as EFS, use:
 
