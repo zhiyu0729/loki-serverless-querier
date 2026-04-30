@@ -8,15 +8,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-kit/log/level"
+
 	"github.com/grafana/loki/v3/pkg/serverless/interval"
 	"github.com/grafana/loki/v3/pkg/serverless/objectstore"
 	"github.com/grafana/loki/v3/pkg/serverless/protocol"
+	util_log "github.com/grafana/loki/v3/pkg/util/log"
 )
 
 const (
 	DefaultInlineRequestLimitBytes  = 4 * 1024 * 1024
 	DefaultInlineResponseLimitBytes = 4 * 1024 * 1024
 	DefaultMaxInvokePayloadBytes    = 6 * 1024 * 1024
+	slowInvokeThreshold             = 5 * time.Second
 )
 
 type Invoker interface {
@@ -198,30 +202,64 @@ func (e *Executor) invokeOnce(ctx context.Context, req protocol.ServerlessQueryR
 		return nil, fmt.Errorf("remote invoke payload is %d bytes, above %d byte limit", len(payload), e.opts.MaxInvokePayloadBytes)
 	}
 
+	started := time.Now()
 	raw, err := e.invoker.Invoke(ctx, payload)
+	invokeDuration := time.Since(started)
 	if err != nil {
+		logSlowInvoke(req, len(payload), len(raw), "", false, invokeDuration, err)
 		return nil, err
 	}
 
 	var resp protocol.ServerlessQueryResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
+		logSlowInvoke(req, len(payload), len(raw), "", false, invokeDuration, err)
 		return nil, fmt.Errorf("decode lambda response: %w", err)
 	}
 	if err := resp.Validate(); err != nil {
+		logSlowInvoke(req, len(payload), len(raw), resp.Status, resp.ResultRef != nil, invokeDuration, err)
 		return nil, fmt.Errorf("invalid lambda response: %w", err)
 	}
+	resultRef := resp.ResultRef != nil
 	if resp.ResultRef != nil {
 		if e.store == nil {
+			logSlowInvoke(req, len(payload), len(raw), resp.Status, resultRef, invokeDuration, errors.New("remote execution returned result_ref but no object store is configured"))
 			return nil, errors.New("remote execution returned result_ref but no object store is configured")
 		}
 		body, err := e.store.Get(ctx, *resp.ResultRef)
 		if err != nil {
+			logSlowInvoke(req, len(payload), len(raw), resp.Status, resultRef, invokeDuration, err)
 			return nil, err
 		}
 		resp.InlineResponse = body
 		resp.ResultRef = nil
 	}
+	logSlowInvoke(req, len(payload), len(raw), resp.Status, resultRef, invokeDuration, nil)
 	return &resp, nil
+}
+
+func logSlowInvoke(req protocol.ServerlessQueryRequest, payloadBytes, responseBytes int, status string, resultRef bool, duration time.Duration, err error) {
+	if duration < slowInvokeThreshold {
+		return
+	}
+	fields := []interface{}{
+		"msg", "slow serverless store invoke",
+		"duration", duration,
+		"tenant", req.TenantID,
+		"operation", req.Operation,
+		"query_type", req.QueryType,
+		"query", req.Query,
+		"start", req.StartTime().Format(time.RFC3339Nano),
+		"end", req.EndTime().Format(time.RFC3339Nano),
+		"length", req.Duration(),
+		"payload_bytes", payloadBytes,
+		"response_bytes", responseBytes,
+		"status", status,
+		"result_ref", resultRef,
+	}
+	if err != nil {
+		fields = append(fields, "err", err)
+	}
+	level.Warn(util_log.Logger).Log(fields...)
 }
 
 func canSplit(req protocol.ServerlessQueryRequest, min time.Duration) bool {
