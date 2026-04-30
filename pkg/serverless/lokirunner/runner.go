@@ -52,6 +52,7 @@ func (r *Runner) runSelectLogs(ctx context.Context, req protocol.ServerlessQuery
 	}
 	queryReq.Start = req.StartTime()
 	queryReq.End = req.EndTime()
+	queryReq.Limit = logLimit(req, queryReq)
 	clearEmptyStoreChunks(&queryReq.StoreChunks)
 	it, err := r.store.SelectLogs(ctx, logql.SelectLogParams{QueryRequest: &queryReq})
 	if err != nil {
@@ -59,7 +60,7 @@ func (r *Runner) runSelectLogs(ctx context.Context, req protocol.ServerlessQuery
 	}
 	defer it.Close()
 
-	resp, err := collectLogs(it)
+	resp, err := collectLogs(it, queryReq.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -107,10 +108,18 @@ func clearEmptyStoreChunks(storeChunks **logproto.ChunkRefGroup) {
 	}
 }
 
-func collectLogs(it iter.EntryIterator) (*logproto.QueryResponse, error) {
+func logLimit(req protocol.ServerlessQueryRequest, queryReq logproto.QueryRequest) uint32 {
+	if queryReq.Limit != 0 {
+		return queryReq.Limit
+	}
+	return req.Limit
+}
+
+func collectLogs(it iter.EntryIterator, limit uint32) (*logproto.QueryResponse, error) {
 	streams := make([]push.Stream, 0)
 	streamByLabels := map[string]int{}
-	for it.Next() {
+	var count uint32
+	for (limit == 0 || count < limit) && it.Next() {
 		labels := it.Labels()
 		idx, ok := streamByLabels[labels]
 		if !ok {
@@ -119,6 +128,7 @@ func collectLogs(it iter.EntryIterator) (*logproto.QueryResponse, error) {
 			streams = append(streams, push.Stream{Labels: labels})
 		}
 		streams[idx].Entries = append(streams[idx].Entries, it.At())
+		count++
 	}
 	if err := it.Err(); err != nil {
 		return nil, err

@@ -5,6 +5,7 @@ package lokirunner
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -107,7 +108,7 @@ func TestRunnerPreservesNonEmptyStoreChunkOverrideForLogs(t *testing.T) {
 	if _, err := runner.RunStoreOnly(context.Background(), req); err != nil {
 		t.Fatalf("RunStoreOnly returned error: %v", err)
 	}
-	if store.logStoreChunks != storeChunks {
+	if !proto.Equal(store.logStoreChunks, storeChunks) {
 		t.Fatalf("log store chunk override = %#v, want %#v", store.logStoreChunks, storeChunks)
 	}
 }
@@ -129,6 +130,123 @@ func TestRunnerClearsEmptyStoreChunkOverrideForSamples(t *testing.T) {
 	if store.sampleStoreChunks != nil {
 		t.Fatalf("sample store chunk override = %#v, want nil", store.sampleStoreChunks)
 	}
+}
+
+func TestRunnerAppliesLogLimitWhileCollecting(t *testing.T) {
+	entries := []logproto.Entry{
+		{Timestamp: time.Unix(100, 0).UTC(), Line: "first"},
+		{Timestamp: time.Unix(101, 0).UTC(), Line: "second"},
+		{Timestamp: time.Unix(102, 0).UTC(), Line: "third"},
+	}
+	logIterator := &recordingEntryIterator{entries: entries, labels: `{app="api"}`}
+	store := &captureStore{logIterator: logIterator}
+	runner := New(store)
+	start := time.Unix(100, 0).UTC()
+	end := time.Unix(200, 0).UTC()
+
+	req := serverlessRequest(t, protocol.OperationSelectLogs, &logproto.QueryRequest{
+		Selector:  `{app="api"}`,
+		Direction: logproto.FORWARD,
+		Limit:     2,
+	}, start, end)
+
+	raw, err := runner.RunStoreOnly(context.Background(), req)
+	if err != nil {
+		t.Fatalf("RunStoreOnly returned error: %v", err)
+	}
+	var resp logproto.QueryResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if got := countResponseEntries(resp); got != 2 {
+		t.Fatalf("response entries = %d, want 2", got)
+	}
+	if got := logIterator.nextCalls; got != 2 {
+		t.Fatalf("iterator Next calls = %d, want 2", got)
+	}
+	if len(resp.Streams) != 1 || len(resp.Streams[0].Entries) != 2 {
+		t.Fatalf("response streams = %#v, want one stream with two entries", resp.Streams)
+	}
+	if resp.Streams[0].Entries[0].Line != "first" || resp.Streams[0].Entries[1].Line != "second" {
+		t.Fatalf("response entries = %#v, want first two entries", resp.Streams[0].Entries)
+	}
+}
+
+func TestRunnerPreservesUnlimitedLogCollectionWhenLimitIsZero(t *testing.T) {
+	entries := []logproto.Entry{
+		{Timestamp: time.Unix(100, 0).UTC(), Line: "first"},
+		{Timestamp: time.Unix(101, 0).UTC(), Line: "second"},
+		{Timestamp: time.Unix(102, 0).UTC(), Line: "third"},
+	}
+	logIterator := &recordingEntryIterator{entries: entries, labels: `{app="api"}`}
+	store := &captureStore{logIterator: logIterator}
+	runner := New(store)
+	start := time.Unix(100, 0).UTC()
+	end := time.Unix(200, 0).UTC()
+
+	req := serverlessRequest(t, protocol.OperationSelectLogs, &logproto.QueryRequest{
+		Selector:  `{app="api"}`,
+		Direction: logproto.FORWARD,
+		Limit:     0,
+	}, start, end)
+
+	raw, err := runner.RunStoreOnly(context.Background(), req)
+	if err != nil {
+		t.Fatalf("RunStoreOnly returned error: %v", err)
+	}
+	var resp logproto.QueryResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if got := countResponseEntries(resp); got != 3 {
+		t.Fatalf("response entries = %d, want 3", got)
+	}
+	if got := logIterator.nextCalls; got != 4 {
+		t.Fatalf("iterator Next calls = %d, want 4", got)
+	}
+}
+
+func TestRunnerFallsBackToEnvelopeLogLimit(t *testing.T) {
+	entries := []logproto.Entry{
+		{Timestamp: time.Unix(100, 0).UTC(), Line: "first"},
+		{Timestamp: time.Unix(101, 0).UTC(), Line: "second"},
+		{Timestamp: time.Unix(102, 0).UTC(), Line: "third"},
+	}
+	logIterator := &recordingEntryIterator{entries: entries, labels: `{app="api"}`}
+	store := &captureStore{logIterator: logIterator}
+	runner := New(store)
+	start := time.Unix(100, 0).UTC()
+	end := time.Unix(200, 0).UTC()
+
+	req := serverlessRequest(t, protocol.OperationSelectLogs, &logproto.QueryRequest{
+		Selector:  `{app="api"}`,
+		Direction: logproto.FORWARD,
+		Limit:     0,
+	}, start, end)
+	req.Limit = 2
+
+	raw, err := runner.RunStoreOnly(context.Background(), req)
+	if err != nil {
+		t.Fatalf("RunStoreOnly returned error: %v", err)
+	}
+	var resp logproto.QueryResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if got := countResponseEntries(resp); got != 2 {
+		t.Fatalf("response entries = %d, want 2", got)
+	}
+	if got := logIterator.nextCalls; got != 2 {
+		t.Fatalf("iterator Next calls = %d, want 2", got)
+	}
+}
+
+func countResponseEntries(resp logproto.QueryResponse) int {
+	count := 0
+	for _, stream := range resp.Streams {
+		count += len(stream.Entries)
+	}
+	return count
 }
 
 func serverlessRequest(t *testing.T, operation string, msg proto.Message, start, end time.Time) protocol.ServerlessQueryRequest {
@@ -159,12 +277,17 @@ type captureStore struct {
 
 	logStoreChunks    *logproto.ChunkRefGroup
 	sampleStoreChunks *logproto.ChunkRefGroup
+
+	logIterator iter.EntryIterator
 }
 
 func (s *captureStore) SelectLogs(_ context.Context, req logql.SelectLogParams) (iter.EntryIterator, error) {
 	s.logStart = req.Start
 	s.logEnd = req.End
 	s.logStoreChunks = req.StoreChunks
+	if s.logIterator != nil {
+		return s.logIterator, nil
+	}
 	return iter.NoopEntryIterator, nil
 }
 
@@ -197,4 +320,40 @@ func (s *captureStore) Volume(context.Context, string, model.Time, model.Time, i
 
 func (s *captureStore) GetShards(context.Context, string, model.Time, model.Time, uint64, chunk.Predicate) (*logproto.ShardsResponse, error) {
 	return &logproto.ShardsResponse{}, nil
+}
+
+type recordingEntryIterator struct {
+	entries   []logproto.Entry
+	labels    string
+	nextCalls int
+	idx       int
+}
+
+func (i *recordingEntryIterator) Next() bool {
+	i.nextCalls++
+	if i.idx >= len(i.entries) {
+		return false
+	}
+	i.idx++
+	return true
+}
+
+func (i *recordingEntryIterator) Err() error {
+	return nil
+}
+
+func (i *recordingEntryIterator) At() logproto.Entry {
+	return i.entries[i.idx-1]
+}
+
+func (i *recordingEntryIterator) Labels() string {
+	return i.labels
+}
+
+func (i *recordingEntryIterator) StreamHash() uint64 {
+	return 0
+}
+
+func (i *recordingEntryIterator) Close() error {
+	return nil
 }
