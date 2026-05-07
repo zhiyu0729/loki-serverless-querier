@@ -135,8 +135,8 @@ index 1b57f7d5..ea253812 100644
 +		MaxInvokePayloadBytes:    backend.Capabilities().MaxInvokePayloadBytes,
 +		FallbackOnFailure:        cfg.FallbackOnFailure,
 +	})
-+	t.Store = lokistore.Wrap(t.Store, storeExecutor, buildinfo.LokiVersion, buildinfo.OverlayVersion, cfg.FallbackOnFailure)
-+	level.Info(util_log.Logger).Log("msg", "serverless store wrapper enabled", "provider", backend.Provider(), "max_interval", cfg.MaxInterval, "max_concurrent", cfg.MaxConcurrent)
++	t.Store = lokistore.Wrap(t.Store, storeExecutor, buildinfo.LokiVersion, buildinfo.OverlayVersion, cfg.FallbackOnFailure, t.Cfg.Querier.QueryIngestersWithin)
++	level.Info(util_log.Logger).Log("msg", "serverless store wrapper enabled", "provider", backend.Provider(), "max_interval", cfg.MaxInterval, "max_concurrent", cfg.MaxConcurrent, "local_store_within", t.Cfg.Querier.QueryIngestersWithin)
 +	return nil
 +}
 +

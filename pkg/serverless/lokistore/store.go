@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/grafana/dskit/tenant"
@@ -26,15 +27,17 @@ type Store struct {
 	lokiVersion       string
 	overlayVersion    string
 	fallbackOnFailure bool
+	localStoreWithin  time.Duration
 }
 
-func Wrap(next storage.Store, exec *executor.ServerlessStoreExecutor, lokiVersion, overlayVersion string, fallbackOnFailure bool) *Store {
+func Wrap(next storage.Store, exec *executor.ServerlessStoreExecutor, lokiVersion, overlayVersion string, fallbackOnFailure bool, localStoreWithin time.Duration) *Store {
 	return &Store{
 		Store:             next,
 		executor:          exec,
 		lokiVersion:       lokiVersion,
 		overlayVersion:    overlayVersion,
 		fallbackOnFailure: fallbackOnFailure,
+		localStoreWithin:  localStoreWithin,
 	}
 }
 
@@ -43,6 +46,27 @@ func (s *Store) SelectLogs(ctx context.Context, params logql.SelectLogParams) (i
 		return s.Store.SelectLogs(ctx, params)
 	}
 
+	remoteParams, localParams := s.splitByLocalStoreWindow(params.Start, params.End)
+	if remoteParams == nil {
+		return s.Store.SelectLogs(ctx, params)
+	}
+	if localParams != nil {
+		remoteIter, err := s.selectRemoteLogs(ctx, logParamsWithInterval(params, remoteParams.start, remoteParams.end))
+		if err != nil {
+			return nil, err
+		}
+		localIter, err := s.Store.SelectLogs(ctx, logParamsWithInterval(params, localParams.start, localParams.end))
+		if err != nil {
+			_ = remoteIter.Close()
+			return nil, err
+		}
+		return iter.NewMergeEntryIterator(ctx, []iter.EntryIterator{remoteIter, localIter}, params.Direction), nil
+	}
+
+	return s.selectRemoteLogs(ctx, params)
+}
+
+func (s *Store) selectRemoteLogs(ctx context.Context, params logql.SelectLogParams) (iter.EntryIterator, error) {
 	req, err := s.requestFromLogParams(ctx, params)
 	if err != nil {
 		return nil, err
@@ -77,6 +101,27 @@ func (s *Store) SelectSamples(ctx context.Context, params logql.SelectSamplePara
 		return s.Store.SelectSamples(ctx, params)
 	}
 
+	remoteParams, localParams := s.splitByLocalStoreWindow(params.Start, params.End)
+	if remoteParams == nil {
+		return s.Store.SelectSamples(ctx, params)
+	}
+	if localParams != nil {
+		remoteIter, err := s.selectRemoteSamples(ctx, sampleParamsWithInterval(params, remoteParams.start, remoteParams.end))
+		if err != nil {
+			return nil, err
+		}
+		localIter, err := s.Store.SelectSamples(ctx, sampleParamsWithInterval(params, localParams.start, localParams.end))
+		if err != nil {
+			_ = remoteIter.Close()
+			return nil, err
+		}
+		return iter.NewMergeSampleIterator(ctx, []iter.SampleIterator{remoteIter, localIter}), nil
+	}
+
+	return s.selectRemoteSamples(ctx, params)
+}
+
+func (s *Store) selectRemoteSamples(ctx context.Context, params logql.SelectSampleParams) (iter.SampleIterator, error) {
 	req, err := s.requestFromSampleParams(ctx, params)
 	if err != nil {
 		return nil, err
@@ -104,6 +149,42 @@ func (s *Store) SelectSamples(ctx context.Context, params logql.SelectSamplePara
 		return iters[0], nil
 	}
 	return iter.NewMergeSampleIterator(ctx, iters), nil
+}
+
+type intervalRange struct {
+	start time.Time
+	end   time.Time
+}
+
+func (s *Store) splitByLocalStoreWindow(start, end time.Time) (remote, local *intervalRange) {
+	if s.localStoreWithin < 0 {
+		return &intervalRange{start: start, end: end}, nil
+	}
+	if s.localStoreWithin == 0 {
+		return nil, &intervalRange{start: start, end: end}
+	}
+	localStart := time.Now().Add(-s.localStoreWithin)
+	if !end.After(localStart) {
+		return &intervalRange{start: start, end: end}, nil
+	}
+	if !start.Before(localStart) {
+		return nil, &intervalRange{start: start, end: end}
+	}
+	return &intervalRange{start: start, end: localStart}, &intervalRange{start: localStart, end: end}
+}
+
+func logParamsWithInterval(params logql.SelectLogParams, start, end time.Time) logql.SelectLogParams {
+	cpy := *params.QueryRequest
+	cpy.Start = start
+	cpy.End = end
+	return logql.SelectLogParams{QueryRequest: &cpy}
+}
+
+func sampleParamsWithInterval(params logql.SelectSampleParams, start, end time.Time) logql.SelectSampleParams {
+	cpy := *params.SampleQueryRequest
+	cpy.Start = start
+	cpy.End = end
+	return logql.SelectSampleParams{SampleQueryRequest: &cpy}
 }
 
 func (s *Store) requestFromLogParams(ctx context.Context, params logql.SelectLogParams) (*protocol.ServerlessQueryRequest, error) {
