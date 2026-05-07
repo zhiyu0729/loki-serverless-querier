@@ -28,6 +28,7 @@ type Store struct {
 	overlayVersion    string
 	fallbackOnFailure bool
 	localStoreWithin  time.Duration
+	now               func() time.Time
 }
 
 func Wrap(next storage.Store, exec *executor.ServerlessStoreExecutor, lokiVersion, overlayVersion string, fallbackOnFailure bool, localStoreWithin time.Duration) *Store {
@@ -38,6 +39,7 @@ func Wrap(next storage.Store, exec *executor.ServerlessStoreExecutor, lokiVersio
 		overlayVersion:    overlayVersion,
 		fallbackOnFailure: fallbackOnFailure,
 		localStoreWithin:  localStoreWithin,
+		now:               func() time.Time { return time.Now().UTC() },
 	}
 }
 
@@ -163,7 +165,7 @@ func (s *Store) splitByLocalStoreWindow(start, end time.Time) (remote, local *in
 	if s.localStoreWithin == 0 {
 		return nil, &intervalRange{start: start, end: end}
 	}
-	localStart := time.Now().Add(-s.localStoreWithin)
+	localStart := s.now().Add(-s.localStoreWithin)
 	if !end.After(localStart) {
 		return &intervalRange{start: start, end: end}, nil
 	}

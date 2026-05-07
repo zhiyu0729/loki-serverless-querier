@@ -28,16 +28,19 @@ import (
 	"github.com/grafana/loki/v3/pkg/storage/stores/shipper/indexshipper/tsdb/sharding"
 )
 
+var fixedNow = time.Unix(1_700_000_000, 0).UTC()
+
 func TestSelectSamplesUsesLocalStoreWithinIngesterWindow(t *testing.T) {
 	local := &captureStore{}
 	invoker := &captureInvoker{}
-	store := Wrap(local, executor.NewServerlessStoreExecutor(invoker, nil, executor.Options{MaxInterval: time.Hour}), "v3.7.1", "test", false, time.Hour)
+	store := Wrap(local, executor.NewServerlessStoreExecutor(invoker, nil, executor.Options{MaxInterval: 2 * time.Hour}), "v3.7.1", "test", false, time.Hour)
+	store.now = func() time.Time { return fixedNow }
 
 	ctx := user.InjectOrgID(context.Background(), "tenant-a")
 	_, err := store.SelectSamples(ctx, logql.SelectSampleParams{
 		SampleQueryRequest: &logproto.SampleQueryRequest{
-			Start:    time.Now().Add(-20 * time.Minute),
-			End:      time.Now().Add(-10 * time.Minute),
+			Start:    fixedNow.Add(-20 * time.Minute),
+			End:      fixedNow.Add(-10 * time.Minute),
 			Selector: `rate({app="api"}[1m])`,
 		},
 	})
@@ -55,13 +58,14 @@ func TestSelectSamplesUsesLocalStoreWithinIngesterWindow(t *testing.T) {
 func TestSelectSamplesOffloadsOutsideIngesterWindow(t *testing.T) {
 	local := &captureStore{}
 	invoker := &captureInvoker{}
-	store := Wrap(local, executor.NewServerlessStoreExecutor(invoker, nil, executor.Options{MaxInterval: time.Hour}), "v3.7.1", "test", false, time.Hour)
+	store := Wrap(local, executor.NewServerlessStoreExecutor(invoker, nil, executor.Options{MaxInterval: 2 * time.Hour}), "v3.7.1", "test", false, time.Hour)
+	store.now = func() time.Time { return fixedNow }
 
 	ctx := user.InjectOrgID(context.Background(), "tenant-a")
 	_, err := store.SelectSamples(ctx, logql.SelectSampleParams{
 		SampleQueryRequest: &logproto.SampleQueryRequest{
-			Start:    time.Now().Add(-3 * time.Hour),
-			End:      time.Now().Add(-2 * time.Hour),
+			Start:    fixedNow.Add(-3 * time.Hour),
+			End:      fixedNow.Add(-2 * time.Hour),
 			Selector: `rate({app="api"}[1m])`,
 		},
 	})
@@ -79,13 +83,14 @@ func TestSelectSamplesOffloadsOutsideIngesterWindow(t *testing.T) {
 func TestSelectSamplesSplitsAcrossIngesterWindow(t *testing.T) {
 	local := &captureStore{}
 	invoker := &captureInvoker{}
-	store := Wrap(local, executor.NewServerlessStoreExecutor(invoker, nil, executor.Options{MaxInterval: time.Hour}), "v3.7.1", "test", false, time.Hour)
+	store := Wrap(local, executor.NewServerlessStoreExecutor(invoker, nil, executor.Options{MaxInterval: 2 * time.Hour}), "v3.7.1", "test", false, time.Hour)
+	store.now = func() time.Time { return fixedNow }
 
 	ctx := user.InjectOrgID(context.Background(), "tenant-a")
 	_, err := store.SelectSamples(ctx, logql.SelectSampleParams{
 		SampleQueryRequest: &logproto.SampleQueryRequest{
-			Start:    time.Now().Add(-2 * time.Hour),
-			End:      time.Now().Add(-30 * time.Minute),
+			Start:    fixedNow.Add(-2 * time.Hour),
+			End:      fixedNow.Add(-30 * time.Minute),
 			Selector: `rate({app="api"}[1m])`,
 		},
 	})
@@ -106,13 +111,14 @@ func TestSelectSamplesSplitsAcrossIngesterWindow(t *testing.T) {
 func TestSelectSamplesWithZeroIngesterWindowUsesLocalStore(t *testing.T) {
 	local := &captureStore{}
 	invoker := &captureInvoker{}
-	store := Wrap(local, executor.NewServerlessStoreExecutor(invoker, nil, executor.Options{MaxInterval: time.Hour}), "v3.7.1", "test", false, 0)
+	store := Wrap(local, executor.NewServerlessStoreExecutor(invoker, nil, executor.Options{MaxInterval: 2 * time.Hour}), "v3.7.1", "test", false, 0)
+	store.now = func() time.Time { return fixedNow }
 
 	ctx := user.InjectOrgID(context.Background(), "tenant-a")
 	_, err := store.SelectSamples(ctx, logql.SelectSampleParams{
 		SampleQueryRequest: &logproto.SampleQueryRequest{
-			Start:    time.Now().Add(-24 * time.Hour),
-			End:      time.Now().Add(-23 * time.Hour),
+			Start:    fixedNow.Add(-24 * time.Hour),
+			End:      fixedNow.Add(-23 * time.Hour),
 			Selector: `rate({app="api"}[1m])`,
 		},
 	})

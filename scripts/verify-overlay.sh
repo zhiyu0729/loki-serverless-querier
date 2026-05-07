@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOKI_VERSION="${LOKI_VERSION:-v3.7.1}"
 WORK_DIR="${WORK_DIR:-$ROOT_DIR/build/loki-$LOKI_VERSION}"
+SKIP_FETCH="${SKIP_FETCH:-0}"
 
 required=(
   "$ROOT_DIR/cmd/loki-serverless-querier/main.go"
@@ -26,7 +27,9 @@ mkdir -p "$(dirname "$WORK_DIR")"
 if [ ! -d "$WORK_DIR/.git" ]; then
   git clone --depth 1 --branch "$LOKI_VERSION" "https://github.com/grafana/loki.git" "$WORK_DIR"
 else
-  git -C "$WORK_DIR" fetch --depth 1 origin "refs/tags/$LOKI_VERSION:refs/tags/$LOKI_VERSION"
+  if [ "$SKIP_FETCH" != "1" ]; then
+    git -C "$WORK_DIR" fetch --depth 1 origin "refs/tags/$LOKI_VERSION:refs/tags/$LOKI_VERSION"
+  fi
   git -C "$WORK_DIR" checkout --force "$LOKI_VERSION"
 fi
 
