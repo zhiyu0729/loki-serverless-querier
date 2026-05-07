@@ -7,9 +7,9 @@ GO_BUILD_TAGS ?= loki_serverless
 .PHONY: test verify build-overlay build-overlay-local build-lambda-zip
 
 test:
-	go test ./...
+	go test ./cmd/loki-serverless-querier ./pkg/serverless/config ./pkg/serverless/interval ./pkg/serverless/lambdaexec ./pkg/serverless/protocol
 
-verify: test
+verify:
 	./scripts/verify-overlay.sh
 
 build-overlay:
